@@ -2,18 +2,40 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/booksee/logo-placeholder.svg" />
+
+    <!-- PWA icons & manifest -->
+    <link rel="icon" type="image/svg+xml" href="/booksee/icon.svg" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="mask-icon" href="/booksee/icon.svg" color="#ff2e3f" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
     />
     <meta name="theme-color" content="#000000" />
+
+    <!-- iOS PWA hints -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="BookSee" />
+    <meta name="format-detection" content="telephone=no" />
+
+    <!-- Windows tile -->
+    <meta name="msapplication-TileColor" content="#0d0d11" />
+
+    <!-- SEO / Open Graph (used on share previews) -->
+    <meta name="description" content="BookSee.App — audiobook OTT player for shorts and long-format stories." />
+    <meta property="og:title" content="BookSee.App" />
+    <meta property="og:description" content="Audiobook OTT player for shorts and long-format stories." />
+    <meta property="og:type" content="website" />
+
     <title>BookSee.App</title>
-    <script type="module" crossorigin src="/booksee/assets/index-CnHVTLEi.js"></script>
-    <link rel="stylesheet" crossorigin href="/booksee/assets/index-DhuomRil.css">
-  </head>
+    <script type="module" crossorigin src="/booksee/assets/index-DXC8pj1k.js"></script>
+    <link rel="stylesheet" crossorigin href="/booksee/assets/index-IsYSqA8Y.css">
+  <link rel="manifest" href="/booksee/manifest.webmanifest"></head>
   <body>
     <div id="root"></div>
   </body>
