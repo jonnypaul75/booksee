@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
-import { LANGUAGES } from '../data/mockData';
+import { getLanguages, LanguageDto } from '../api';
+import { useAsync } from '../hooks/useAsync';
 import { CheckIcon, CloseIcon } from '../components/Icons';
 
 interface LanguagePopupProps {
@@ -10,7 +11,12 @@ interface LanguagePopupProps {
 }
 
 const LanguagePopup: React.FC<LanguagePopupProps> = ({ open, selected, onClose, onSelect }) => {
-  // Lock background scroll while open
+  // Fetch languages on first open. Cached across opens because deps=[].
+  const { data: languages, loading, error } = useAsync<LanguageDto[]>(
+    (signal) => getLanguages(signal),
+    []
+  );
+
   useEffect(() => {
     if (!open) return;
     const prev = document.body.style.overflow;
@@ -50,29 +56,36 @@ const LanguagePopup: React.FC<LanguagePopupProps> = ({ open, selected, onClose, 
         >
           Choose your audio &amp; subtitle language. You can change this later from Profile → Preferences.
         </p>
-        <ul className="bs-lang-list">
-          {LANGUAGES.map((lang) => {
-            const active = lang.code === selected;
-            return (
-              <li key={lang.code}>
-                <button
-                  className={`bs-lang-item ${active ? 'bs-lang-item--active' : ''}`}
-                  onClick={() => {
-                    onSelect(lang.code);
-                    onClose();
-                  }}
-                  style={{ width: '100%' }}
-                >
-                  <div>
-                    <div style={{ fontWeight: 600 }}>{lang.nativeName}</div>
-                    <div style={{ fontSize: 11, color: 'var(--bs-text-dim)' }}>{lang.name}</div>
-                  </div>
-                  {active && <CheckIcon size={18} style={{ color: 'var(--bs-orange)' }} />}
-                </button>
-              </li>
-            );
-          })}
-        </ul>
+
+        {error ? (
+          <div className="bs-no-results">Couldn't load languages. {error.message}</div>
+        ) : loading || !languages ? (
+          <div className="bs-loader">Loading…</div>
+        ) : (
+          <ul className="bs-lang-list">
+            {languages.map((lang) => {
+              const active = lang.code === selected;
+              return (
+                <li key={lang.code}>
+                  <button
+                    className={`bs-lang-item ${active ? 'bs-lang-item--active' : ''}`}
+                    onClick={() => {
+                      onSelect(lang.code);
+                      onClose();
+                    }}
+                    style={{ width: '100%' }}
+                  >
+                    <div>
+                      <div style={{ fontWeight: 600 }}>{lang.nativeName}</div>
+                      <div style={{ fontSize: 11, color: 'var(--bs-text-dim)' }}>{lang.name}</div>
+                    </div>
+                    {active && <CheckIcon size={18} style={{ color: 'var(--bs-orange)' }} />}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </div>
     </div>
   );

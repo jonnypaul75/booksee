@@ -1,6 +1,19 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ContentItem } from '../types';
-import { SHORT_CONTENT } from '../data/mockData';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  CURRENT_USER_ID,
+  ContentDetailDto,
+  ContentSummaryDto,
+  EpisodeDto,
+  createWatchEvent,
+  getContent,
+  listContent,
+  upsertProgress,
+} from '../api';
+import { useMediaSession } from '../pwa/useMediaSession';
+import { useWakeLock } from '../pwa/useWakeLock';
+import { usePlayer } from '../contexts/PlayerContext';
+import { shareContent } from '../utils/sharing';
+import VideoPlayer, { VideoPlayerHandle } from '../components/VideoPlayer';
 import {
   BookmarkIcon,
   CloseIcon,
@@ -9,52 +22,131 @@ import {
   ShareIcon,
 } from '../components/Icons';
 
-interface ShortsPlayerProps {
-  initial: ContentItem;
-  onClose: () => void;
-}
+const FALLBACK_DURATION_MS = 5000;
+const PEER_STORY_LIMIT = 20;
 
 /**
- * WhatsApp-status-style shorts player.
+ * WhatsApp-status / YouTube-shorts style player. Sources the active
+ * content from PlayerContext so deep links can open it.
  *
- * Navigation:
- *  - Tap left third of screen  → previous episode within the current story
- *  - Tap right third of screen → next episode within the current story
- *  - Swipe DOWN → previous story (different short)
- *  - Swipe UP   → next story
- *
- * Episodes auto-advance after a fixed timer (PROGRESS_DURATION_MS).
- * When the last episode of a story completes it falls forward to the next story.
+ * Shorts intentionally don't support minimize — they're brief and
+ * auto-advancing. The mini player only ever renders for long format.
  */
+const ShortsPlayer: React.FC = () => {
+  const { content, close } = usePlayer();
+  const initial = content && content.format === 'short' ? content : null;
 
-const PROGRESS_DURATION_MS = 5000;
-
-const ShortsPlayer: React.FC<ShortsPlayerProps> = ({ initial, onClose }) => {
-  // Build a story list seeded with the chosen item first so swipes feel natural.
-  const stories = useMemo<ContentItem[]>(() => {
-    const idx = SHORT_CONTENT.findIndex((c) => c.id === initial.id);
-    if (idx < 0) return [initial, ...SHORT_CONTENT];
-    return [...SHORT_CONTENT.slice(idx), ...SHORT_CONTENT.slice(0, idx)];
-  }, [initial.id]);
+  const [peerStories, setPeerStories] = useState<ContentSummaryDto[]>([]);
+  const [activeDetail, setActiveDetail] = useState<ContentDetailDto | null>(null);
 
   const [storyIdx, setStoryIdx] = useState(0);
   const [episodeIdx, setEpisodeIdx] = useState(0);
-  const [progress, setProgress] = useState(0); // 0..1
+  const [progress, setProgress] = useState(0);
   const [paused, setPaused] = useState(false);
+  const [shareToast, setShareToast] = useState<string | null>(null);
 
-  const story = stories[storyIdx];
-  const episodes = story.episodes ?? [];
+  const videoRef = useRef<VideoPlayerHandle | null>(null);
+  const sessionStartRef = useRef<Date>(new Date());
+  const sessionStartPosRef = useRef<number>(0);
+
+  const stories: ContentSummaryDto[] = useMemo(
+    () => (initial ? [initial, ...peerStories] : peerStories),
+    [initial, peerStories]
+  );
+
+  useWakeLock(!paused && initial !== null);
+
+  // Reset to first story when active content changes.
+  useEffect(() => {
+    setStoryIdx(0);
+    setEpisodeIdx(0);
+    setProgress(0);
+  }, [initial?.id]);
+
+  useEffect(() => {
+    if (!initial) return;
+    let cancelled = false;
+    listContent({ format: 'short', pageSize: PEER_STORY_LIMIT })
+      .then((res) => {
+        if (cancelled) return;
+        setPeerStories(res.items.filter((c) => c.id !== initial.id));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [initial?.id]);
+
+  useEffect(() => {
+    const active = stories[storyIdx];
+    if (!active) return;
+    let cancelled = false;
+    setActiveDetail(null);
+    setEpisodeIdx(0);
+    setProgress(0);
+
+    getContent(active.id)
+      .then((d) => {
+        if (cancelled) return;
+        setActiveDetail(d);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [storyIdx, stories]);
+
+  const episodes: EpisodeDto[] = activeDetail?.episodes ?? [];
   const totalEpisodes = Math.max(episodes.length, 1);
+  const activeEpisode: EpisodeDto | undefined = episodes[episodeIdx];
+  const hasVideo = !!activeEpisode?.videoUrl;
 
-  /* ----------- Auto-progress timer ----------- */
+  useEffect(() => {
+    if (!activeDetail || !activeEpisode) return;
+    upsertProgress(CURRENT_USER_ID, {
+      contentId: activeDetail.id,
+      episodeId: activeEpisode.id,
+      positionSeconds: 0,
+      durationSeconds: activeEpisode.durationSeconds || 60,
+      lastPlayedLanguage: activeDetail.language?.toLowerCase().slice(0, 2),
+    }).catch(() => undefined);
+    sessionStartRef.current = new Date();
+    sessionStartPosRef.current = 0;
+  }, [activeDetail, activeEpisode]);
+
+  const advanceEpisode = useCallback(() => {
+    setEpisodeIdx((i) => {
+      if (i + 1 < totalEpisodes) return i + 1;
+      setStoryIdx((s) => (s + 1 < stories.length ? s + 1 : 0));
+      return 0;
+    });
+  }, [totalEpisodes, stories.length]);
+
+  const rewindEpisode = useCallback(() => {
+    setEpisodeIdx((i) => {
+      if (i > 0) return i - 1;
+      setStoryIdx((s) => Math.max(0, s - 1));
+      return 0;
+    });
+  }, []);
+
+  const goNextStory = useCallback(() => {
+    setStoryIdx((i) => (i + 1 < stories.length ? i + 1 : 0));
+    setEpisodeIdx(0);
+  }, [stories.length]);
+
+  const goPrevStory = useCallback(() => {
+    setStoryIdx((i) => Math.max(0, i - 1));
+    setEpisodeIdx(0);
+  }, []);
+
   useEffect(() => {
     setProgress(0);
-    if (paused) return;
+    if (paused || hasVideo) return;
     const start = performance.now();
     let raf = 0;
-
     const tick = (now: number) => {
-      const p = Math.min(1, (now - start) / PROGRESS_DURATION_MS);
+      const p = Math.min(1, (now - start) / FALLBACK_DURATION_MS);
       setProgress(p);
       if (p >= 1) {
         advanceEpisode();
@@ -64,49 +156,34 @@ const ShortsPlayer: React.FC<ShortsPlayerProps> = ({ initial, onClose }) => {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [storyIdx, episodeIdx, paused]);
+  }, [storyIdx, episodeIdx, paused, hasVideo, advanceEpisode]);
 
-  /* ----------- Navigation ----------- */
+  useEffect(() => {
+    if (!hasVideo) return;
+    const v = videoRef.current;
+    if (!v) return;
+    if (paused) v.pause();
+    else void v.play();
+  }, [paused, hasVideo]);
 
-  const advanceEpisode = () => {
-    if (episodeIdx + 1 < totalEpisodes) {
-      setEpisodeIdx((i) => i + 1);
-    } else {
-      goNextStory();
-    }
-  };
+  useMediaSession(
+    activeDetail
+      ? {
+          title: activeDetail.title,
+          artist: activeDetail.author,
+          album: `Episode ${episodeIdx + 1}`,
+          artwork: activeEpisode?.posterUrl ?? activeDetail.posterUrl,
+        }
+      : null,
+    {
+      onPlay: () => setPaused(false),
+      onPause: () => setPaused(true),
+      onPrevious: rewindEpisode,
+      onNext: advanceEpisode,
+    },
+    activeDetail ? (paused ? 'paused' : 'playing') : 'none'
+  );
 
-  const rewindEpisode = () => {
-    if (episodeIdx > 0) {
-      setEpisodeIdx((i) => i - 1);
-    } else {
-      goPrevStory(true);
-    }
-  };
-
-  const goNextStory = () => {
-    if (storyIdx + 1 < stories.length) {
-      setStoryIdx((i) => i + 1);
-      setEpisodeIdx(0);
-    } else {
-      // Loop to the start
-      setStoryIdx(0);
-      setEpisodeIdx(0);
-    }
-  };
-
-  const goPrevStory = (jumpToLastEpisode = false) => {
-    if (storyIdx === 0) {
-      setEpisodeIdx(0);
-      setProgress(0);
-      return;
-    }
-    setStoryIdx((i) => i - 1);
-    setEpisodeIdx(jumpToLastEpisode ? Math.max(0, totalEpisodes - 1) : 0);
-  };
-
-  /* ----------- Touch handlers for vertical swipe between stories ----------- */
   const touchRef = useRef<{ x: number; y: number; t: number } | null>(null);
 
   const onTouchStart = (e: React.TouchEvent) => {
@@ -126,42 +203,64 @@ const ShortsPlayer: React.FC<ShortsPlayerProps> = ({ initial, onClose }) => {
     const adx = Math.abs(dx);
     const ady = Math.abs(dy);
     const dt = Date.now() - start.t;
-
-    // Vertical swipe wins when y movement is dominant
     if (ady > 50 && ady > adx && dt < 600) {
       if (dy < 0) goNextStory();
       else goPrevStory();
     }
   };
 
-  /* ----------- Render ----------- */
-
-  // Active episode poster (used as image since we don't have real videos)
-  const activeEpisode = episodes[episodeIdx] ?? {
-    id: story.id,
-    title: story.title,
-    duration: 5,
-    posterUrl: story.posterUrl,
+  const handleShare = async () => {
+    const current = stories[storyIdx];
+    if (!current) return;
+    const result = await shareContent(current);
+    if (result === 'copied') setShareToast('Link copied');
+    else if (result === 'shared') setShareToast('Shared');
+    if (result !== 'failed') window.setTimeout(() => setShareToast(null), 2000);
   };
 
+  const handleClose = () => {
+    if (activeDetail && activeEpisode) {
+      const startedAt = sessionStartRef.current.toISOString();
+      const endedAt = new Date().toISOString();
+      const secondsWatched = Math.max(
+        1,
+        Math.round((Date.now() - sessionStartRef.current.getTime()) / 1000)
+      );
+      createWatchEvent(CURRENT_USER_ID, {
+        contentId: activeDetail.id,
+        episodeId: activeEpisode.id,
+        startedAt,
+        endedAt,
+        secondsWatched,
+        startPosition: sessionStartPosRef.current,
+        endPosition: Math.round(progress * (activeEpisode.durationSeconds || 60)),
+        languageCode: activeDetail.language?.toLowerCase().slice(0, 2),
+        completed: progress >= 0.95,
+        exitReason: 'user_quit',
+        networkType: navigator.onLine ? 'wifi' : 'unknown',
+      }).catch(() => undefined);
+    }
+    close();
+  };
+
+  if (!initial) return null;
+
   return (
-    <div
-      className="bs-shorts-player"
-      onTouchStart={onTouchStart}
-      onTouchEnd={onTouchEnd}
-    >
-      {/* Stories are stacked vertically; translateY simulates the swipe transition */}
+    <div className="bs-shorts-player" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
       <div
         className="bs-shorts-stage"
-        style={{ transform: `translateY(-${storyIdx * 100}%)`, height: `${stories.length * 100}%` }}
+        style={{
+          transform: `translateY(-${storyIdx * 100}%)`,
+          height: `${stories.length * 100}%`,
+        }}
       >
         {stories.map((s, i) => {
           const isActive = i === storyIdx;
-          const eps = s.episodes ?? [];
+          const eps = isActive ? episodes : [];
           const curEp = isActive ? episodeIdx : 0;
+
           return (
             <section className="bs-shorts-story" key={s.id} aria-hidden={!isActive}>
-              {/* Episode horizontal track */}
               <div
                 className="bs-shorts-episode-track"
                 style={{
@@ -169,33 +268,46 @@ const ShortsPlayer: React.FC<ShortsPlayerProps> = ({ initial, onClose }) => {
                   transform: `translateX(-${(curEp * 100) / Math.max(eps.length, 1)}%)`,
                 }}
               >
-                {(eps.length ? eps : [{ id: s.id, title: s.title, duration: 5, posterUrl: s.posterUrl }]).map(
-                  (ep) => (
+                {(eps.length
+                  ? eps
+                  : [
+                      {
+                        id: -1 * s.id,
+                        episodeNumber: 1,
+                        durationSeconds: 0,
+                        posterUrl: s.posterUrl,
+                      } as EpisodeDto,
+                    ]
+                ).map((ep, epIdx) => {
+                  const isActiveEp = isActive && epIdx === episodeIdx;
+                  if (isActiveEp && ep.videoUrl) {
+                    return (
+                      <div className="bs-shorts-episode" key={ep.id}>
+                        <VideoPlayer
+                          ref={videoRef}
+                          src={ep.videoUrl}
+                          poster={ep.posterUrl ?? s.posterUrl}
+                          autoPlay
+                          playsInline
+                          muted={false}
+                          preload="auto"
+                          ariaLabel={`${s.title} — Episode ${ep.episodeNumber}`}
+                          onTimeUpdate={(t, d) => {
+                            if (d > 0) setProgress(Math.min(1, t / d));
+                          }}
+                          onEnded={() => advanceEpisode()}
+                        />
+                      </div>
+                    );
+                  }
+                  return (
                     <div className="bs-shorts-episode" key={ep.id}>
-                      {/* Replace <img> with <video autoPlay muted loop playsInline src={ep.videoUrl}/> when wiring real media */}
-                        <video
-  src={(ep as any).videoUrl || "https://files.catbox.moe/hbn2bk.mp4"}
-  autoPlay
-  muted
-  loop
-  playsInline
-  preload="auto"
-  className="bs-shorts-video"
-   style={{
-    position: "fixed",
-    inset: 0,
-    width: "100vw",
-    height: "100vh",
-    objectFit: "cover",
-    background: "#000",
-  }}
-/>
+                      <img src={ep.posterUrl ?? s.posterUrl} alt={s.title} />
                     </div>
-                  )
-                )}
+                  );
+                })}
               </div>
 
-              {/* Progress bars at top */}
               {isActive && (
                 <div className="bs-shorts-progress">
                   {Array.from({ length: Math.max(eps.length, 1) }).map((_, k) => (
@@ -219,28 +331,14 @@ const ShortsPlayer: React.FC<ShortsPlayerProps> = ({ initial, onClose }) => {
                 </div>
               )}
 
-              {/* Tap zones for episode prev/next */}
               {isActive && (
                 <div className="bs-shorts-tap-zones">
-                  <div
-                    className="bs-shorts-tap-zone"
-                    onClick={rewindEpisode}
-                    aria-label="Previous episode"
-                  />
-                  <div
-                    className="bs-shorts-tap-zone"
-                    onClick={() => setPaused((p) => !p)}
-                    aria-label="Toggle pause"
-                  />
-                  <div
-                    className="bs-shorts-tap-zone"
-                    onClick={advanceEpisode}
-                    aria-label="Next episode"
-                  />
+                  <div className="bs-shorts-tap-zone" onClick={rewindEpisode} aria-label="Previous episode" />
+                  <div className="bs-shorts-tap-zone" onClick={() => setPaused((p) => !p)} aria-label="Toggle pause" />
+                  <div className="bs-shorts-tap-zone" onClick={advanceEpisode} aria-label="Next episode" />
                 </div>
               )}
 
-              {/* Side actions */}
               {isActive && (
                 <div className="bs-shorts-actions">
                   <button className="bs-shorts-action" aria-label="Like">
@@ -252,13 +350,12 @@ const ShortsPlayer: React.FC<ShortsPlayerProps> = ({ initial, onClose }) => {
                   <button className="bs-shorts-action" aria-label="Save">
                     <BookmarkIcon size={20} />
                   </button>
-                  <button className="bs-shorts-action" aria-label="Share">
+                  <button className="bs-shorts-action" aria-label="Share" onClick={handleShare}>
                     <ShareIcon size={20} />
                   </button>
                 </div>
               )}
 
-              {/* Bottom overlay */}
               {isActive && (
                 <div className="bs-shorts-overlay">
                   <h2 className="bs-shorts-title">{s.title}</h2>
@@ -272,10 +369,11 @@ const ShortsPlayer: React.FC<ShortsPlayerProps> = ({ initial, onClose }) => {
         })}
       </div>
 
-      {/* Close */}
-      <button className="bs-shorts-close" onClick={onClose} aria-label="Close player">
+      <button className="bs-shorts-close" onClick={handleClose} aria-label="Close player">
         <CloseIcon size={20} />
       </button>
+
+      {shareToast && <div className="bs-toast">{shareToast}</div>}
     </div>
   );
 };

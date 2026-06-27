@@ -1,4 +1,5 @@
 import React from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { TabId } from '../types';
 import {
   ShortsIcon,
@@ -9,34 +10,55 @@ import {
 } from './Icons';
 
 interface FooterProps {
-  active: TabId;
-  onChange: (tab: TabId) => void;
+  /** Opens the language modal — handled by App, not a real route. */
+  onOpenLanguage: () => void;
+  /** True while the language modal is open (highlights the chip). */
+  languageOpen: boolean;
 }
 
 interface TabDef {
   id: TabId;
   label: string;
+  path: string;
   Icon: React.FC<React.SVGProps<SVGSVGElement> & { size?: number }>;
 }
 
 const TABS: TabDef[] = [
-  { id: 'shorts', label: 'Shorts', Icon: ShortsIcon },
-  { id: 'long', label: 'Long', Icon: LongFormatIcon },
-  { id: 'search', label: 'Search', Icon: SearchIcon },
-  { id: 'language', label: 'Language', Icon: LanguageIcon },
-  { id: 'profile', label: 'Profile', Icon: ProfileIcon },
+  { id: 'shorts',   label: 'Shorts',   path: '/shorts',  Icon: ShortsIcon },
+  { id: 'long',     label: 'Long',     path: '/long',    Icon: LongFormatIcon },
+  { id: 'search',   label: 'Search',   path: '/search',  Icon: SearchIcon },
+  { id: 'language', label: 'Language', path: '',         Icon: LanguageIcon },
+  { id: 'profile',  label: 'Profile',  path: '/profile', Icon: ProfileIcon },
 ];
 
-const Footer: React.FC<FooterProps> = ({ active, onChange }) => {
+const Footer: React.FC<FooterProps> = ({ onOpenLanguage, languageOpen }) => {
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  const activeId: TabId | null = languageOpen
+    ? 'language'
+    : location.pathname.startsWith('/shorts')
+      ? 'shorts'
+      : location.pathname.startsWith('/long')
+        ? 'long'
+        : location.pathname.startsWith('/search')
+          ? 'search'
+          : location.pathname.startsWith('/profile')
+            ? 'profile'
+            : null;
+
   return (
     <nav className="bs-footer" aria-label="Bottom navigation">
-      {TABS.map(({ id, label, Icon }) => {
-        const isActive = active === id;
+      {TABS.map(({ id, label, path, Icon }) => {
+        const isActive = activeId === id;
         return (
           <button
             key={id}
             className={`bs-footer__btn ${isActive ? 'bs-footer__btn--active' : ''}`}
-            onClick={() => onChange(id)}
+            onClick={() => {
+              if (id === 'language') onOpenLanguage();
+              else navigate(path);
+            }}
             aria-label={label}
             aria-current={isActive ? 'page' : undefined}
           >
